@@ -1,0 +1,7 @@
+# Python:
+__pycache__/
+*.py[cod]
+
+# my ignore
+bert_weights_chinese
+data/cmrc2019_*.json_*
