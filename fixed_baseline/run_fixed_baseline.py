@@ -169,12 +169,7 @@ def read_squad_examples(input_data, is_training):
         if is_training:
             choices=paragraph["choices"]
             for answer_index,choice_num in enumerate(paragraph["answers"]):
-                answer_text="[unused{}]".format(str((answer_index)+1))
-                # tmp_answer_text=''
-                # for word in answer_text:
-                #     tmp_answer_text+=word+" "
-                # answer_text=tmp_answer_text.strip()
-                orig_answer_text = answer_text
+                orig_answer_text="[unused{}]".format(str((answer_index)+1))
                 question_text = choices[choice_num]
                 answer_offset = paragraph_text.find(orig_answer_text)
                 answer_length = len(orig_answer_text)
@@ -198,11 +193,12 @@ def read_squad_examples(input_data, is_training):
                     continue
 
                 example = SquadExample(
-                    qas_id=str(context_index)+"###"+str(answer_index),
-                    question_text=question_text,
-                    doc_tokens=doc_tokens,
-                    orig_answer_text=orig_answer_text,
-                    position=start_position)
+                    qas_id=str(context_index)+"###"+str(answer_index), # e.g. TRIAL_00001###0
+                    question_text=question_text, # 正确答案句子, str类型
+                    doc_tokens=doc_tokens, # 字的token list, 但是其中[unused1]是一个整体
+                    orig_answer_text=orig_answer_text, # [unused1]
+                    position=start_position # [unused1]出现的位置
+                    )
                 examples.append(example)
         else:
 
@@ -211,20 +207,14 @@ def read_squad_examples(input_data, is_training):
                 question_text = choice
                 orig_answer_text = None
                 position = None
-                # Only add answers where the text can be exactly recovered from the
-                # document. If this CAN'T happen it's likely due to weird Unicode
-                # stuff so we will just skip the example.
-                #
-                # Note that this means for training mode, every example is NOT
-                # guaranteed to be preserved.
-
 
                 example = SquadExample(
-                    qas_id=str(context_index)+"###"+str(choice_index),
-                    question_text=question_text,
-                    doc_tokens=doc_tokens,
-                    orig_answer_text=answer_index,
-                    position=position)
+                    qas_id=str(context_index)+"###"+str(choice_index), # e.g. TRIAL_00001###0
+                    question_text=question_text, # 第i个句子(paragraph["choices"][i]), str类型
+                    doc_tokens=doc_tokens, # 字的token list, 但是其中[unused1]是一个整体
+                    orig_answer_text=answer_index, # int类型的一个list
+                    position=position # None
+                    )
                 examples.append(example)
     return examples
 
