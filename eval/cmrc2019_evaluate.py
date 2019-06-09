@@ -8,9 +8,9 @@ import re
 import argparse
 import json
 import os
-import sys
-reload(sys)
-sys.setdefaultencoding('utf8')
+# import sys
+# reload(sys)
+# sys.setdefaultencoding('utf8')
 
 
 #
@@ -76,4 +76,3 @@ if __name__ == '__main__':
 	print('PAC: {}'.format(PAC))
 	print('TOTAL: {}'.format(TOTAL))
 	print('SKIP: {}'.format(SKIP))
-

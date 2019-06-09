@@ -41,6 +41,10 @@ from pytorch_pretrained_bert.modeling import BertPreTrainedModel,BertModel,BertC
 from pytorch_pretrained_bert.optimization import BertAdam
 from pytorch_pretrained_bert.file_utils import PYTORCH_PRETRAINED_BERT_CACHE
 
+import sys
+sys.path.append('..')
+from eval.cmrc2019_evaluate import evaluate
+
 logging.basicConfig(format = '%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
                     datefmt = '%m/%d/%Y %H:%M:%S',
                     level = logging.INFO)
@@ -366,7 +370,7 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
                 doc_offset = len(query_tokens) + 2
                 position = tok_position - doc_start + doc_offset
 
-            if example_index < 5:
+            if example_index < 5 and is_training:
                 logger.info("*** Example ***")
                 logger.info("unique_id: %s" % (unique_id))
                 logger.info("example_index: %s" % (example_index))
@@ -486,9 +490,9 @@ RawResult = collections.namedtuple("RawResult",
                                    ["unique_id", "logits"])
 
 
-def write_predictions(all_examples, all_features, all_results, n_best_size,
+def get_or_write_predictions(all_examples, all_features, all_results, n_best_size,
                       max_answer_length, do_lower_case, output_prediction_file,
-                      output_nbest_file, verbose_logging):
+                      output_nbest_file, verbose_logging, return_mode=False):
     """Write final predictions to the json file."""
     logger.info("Writing predictions to: %s" % (output_prediction_file))
     logger.info("Writing nbest to: %s" % (output_nbest_file))
@@ -670,10 +674,10 @@ def write_predictions(all_examples, all_features, all_results, n_best_size,
                 except Exception as e:
                     continue
 
-    json.dump(out_put_predict,open(output_prediction_file,mode="w"), indent=3)
-
-
-
+    if return_mode:
+        return out_put_predict
+    else:
+        json.dump(out_put_predict,open(output_prediction_file,mode="w"), indent=3)
 
 
 def get_final_text(pred_text, orig_text, do_lower_case, verbose_logging=False):
@@ -811,6 +815,297 @@ def warmup_linear(x, warmup=0.002):
         return x/warmup
     return 1.0 - x
 
+def gen_predict_raw_result(args, model, raw_test_data, tokenizer, device):
+    eval_examples = read_squad_examples(
+        raw_test_data, is_training=False)
+    # eval_examples=eval_examples[:100]
+    eval_features = convert_examples_to_features(
+        examples=eval_examples,
+        tokenizer=tokenizer,
+        max_seq_length=args.max_seq_length,
+        doc_stride=args.doc_stride,
+        max_query_length=args.max_query_length,
+        is_training=False)
+
+    logger.info("***** Running predictions *****")
+    logger.info("  Num orig examples = %d", len(eval_examples))
+    logger.info("  Num split examples = %d", len(eval_features))
+    logger.info("  Batch size = %d", args.predict_batch_size)
+
+    all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
+    all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
+    all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
+    all_answer_pos= torch.tensor([f.answer_position_mask for f in  eval_features],dtype=torch.long)
+    all_example_index = torch.arange(all_input_ids.size(0), dtype=torch.long)
+    eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids,all_answer_pos, all_example_index)
+    # Run prediction for full data
+    eval_sampler = SequentialSampler(eval_data)
+    eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.predict_batch_size)
+
+    model.eval()
+    all_results = []
+    logger.info("Start evaluating")
+    for input_ids, input_mask, segment_ids,answer_pos, example_indices in tqdm(eval_dataloader, desc="Evaluating",disable=None):
+        if len(all_results) % 1000 == 0:
+            logger.info("Processing example: %d" % (len(all_results)))
+        input_ids = input_ids.to(device)
+        input_mask = input_mask.to(device)
+        segment_ids = segment_ids.to(device)
+        answer_pos=answer_pos.to(device)
+        with torch.no_grad():
+            batch_logits = model(input_ids, segment_ids, input_mask,answer_pos)
+        for i, example_index in enumerate(example_indices):
+            logits = batch_logits[i].detach().cpu().tolist()
+            eval_feature = eval_features[example_index.item()]
+            unique_id = int(eval_feature.unique_id)
+            all_results.append(RawResult(unique_id=unique_id,
+                                         logits=logits))
+    return eval_examples, eval_features, all_results
+
+def do_train(args):
+    ## Do Train
+
+    # 设置种子
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if args.n_gpu > 0:
+        torch.cuda.manual_seed_all(args.seed)
+
+    if args.gradient_accumulation_steps < 1:
+        raise ValueError("Invalid gradient_accumulation_steps parameter: {}, should be >= 1".format(
+                            args.gradient_accumulation_steps))
+    args.train_batch_size = int(args.train_batch_size / args.gradient_accumulation_steps)
+
+    if not args.train_file:
+        raise ValueError("If `do_train` is True, then `train_file` must be specified.")
+    raw_train_data=json.load(open(args.train_file,mode='r'))
+    if args.do_evaluate:
+        if not args.dev_file:
+            raise ValueError("If `do_evaluate` is True, then `dev_file` must be specified.")
+        raw_dev_data=json.load(open(args.dev_file,mode='r'))
+
+    if os.path.exists(args.output_dir)==False:
+        # raise ValueError("Output directory () already exists and is not empty.")
+        os.makedirs(args.output_dir, exist_ok=True)
+
+    train_examples = None
+    num_train_steps = None
+    train_examples = read_squad_examples(raw_train_data, is_training = True)
+    logger.info("train examples {}".format(len(train_examples)))
+    num_train_steps = int(
+        len(train_examples) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
+
+    # Prepare model
+    bert_config = BertConfig.from_json_file(args.bert_config_file)
+    tokenizer = BertTokenizer(vocab_file=args.vocab_file, do_lower_case=args.do_lower_case)
+    model =BertForQuestionAnswering(bert_config)
+    if args.init_checkpoint is None:
+        raise ValueError("init checkpoint path must be valid.")
+
+    logger.info('load bert weight')
+    state_dict=torch.load(args.init_checkpoint, map_location='cpu')
+    missing_keys = []
+    unexpected_keys = []
+    error_msgs = []
+    # copy state_dict so _load_from_state_dict can modify it
+    metadata = getattr(state_dict, '_metadata', None)
+    state_dict = state_dict.copy()
+    # new_state_dict=state_dict.copy()
+    # for kye ,value in state_dict.items():
+    #     new_state_dict[kye.replace("bert","c_bert")]=value
+    # state_dict=new_state_dict
+    if metadata is not None:
+        state_dict._metadata = metadata
+    def load(module, prefix=''):
+        local_metadata = {} if metadata is None else metadata.get(prefix[:-1], {})
+
+        module._load_from_state_dict(
+            state_dict, prefix, local_metadata, True, missing_keys, unexpected_keys, error_msgs)
+        for name, child in module._modules.items():
+            # logger.info("name {} chile {}".format(name,child))
+            if child is not None:
+                load(child, prefix + name + '.')
+    load(model, prefix='' if hasattr(model, 'bert') else 'bert.')
+    logger.info("missing keys:{}".format(missing_keys))
+    logger.info('unexpected keys:{}'.format(unexpected_keys))
+    logger.info('error msgs:{}'.format(error_msgs))
+    if args.fp16:
+        model.half()
+    model.to(args.device)
+    if args.local_rank != -1:
+        try:
+            from apex.parallel import DistributedDataParallel as DDP
+        except ImportError:
+            raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use distributed and fp16 training.")
+
+        model = DDP(model)
+    elif args.n_gpu > 1:
+        model = torch.nn.DataParallel(model)
+
+    # Prepare optimizer
+    param_optimizer = list(model.named_parameters())
+
+    # hack to remove pooler, which is not used
+    # thus it produce None grad that break apex
+    param_optimizer = [n for n in param_optimizer if 'pooler' not in n[0]]
+
+    no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+    optimizer_grouped_parameters = [
+        {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
+        {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+        ]
+
+    t_total = num_train_steps
+    if args.local_rank != -1:
+        t_total = t_total // torch.distributed.get_world_size()
+    if args.fp16:
+        try:
+            from apex.optimizers import FP16_Optimizer
+            from apex.optimizers import FusedAdam
+        except ImportError:
+            raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use distributed and fp16 training.")
+
+        optimizer = FusedAdam(optimizer_grouped_parameters,
+                              lr=args.learning_rate,
+                              bias_correction=False,
+                              max_grad_norm=1.0)
+        if args.loss_scale == 0:
+            optimizer = FP16_Optimizer(optimizer, dynamic_loss_scale=True)
+        else:
+            optimizer = FP16_Optimizer(optimizer, static_loss_scale=args.loss_scale)
+    else:
+        optimizer = BertAdam(optimizer_grouped_parameters,
+                             lr=args.learning_rate,
+                             warmup=args.warmup_proportion,
+                             t_total=t_total)
+
+    global_step = 0
+    cached_train_features_file = args.train_file+'_{0}_{1}_{2}_v{3}'.format(str(args.max_seq_length), str(args.doc_stride), str(args.max_query_length),str(2))
+    train_features = None
+    try:
+        with open(cached_train_features_file, "rb") as reader:
+            train_features = pickle.load(reader)
+    except:
+        train_features = convert_examples_to_features(
+            examples=train_examples,
+            tokenizer=tokenizer,
+            max_seq_length=args.max_seq_length,
+            doc_stride=args.doc_stride,
+            max_query_length=args.max_query_length,
+            is_training=True)
+
+        if args.local_rank == -1 or torch.distributed.get_rank() == 0:
+            logger.info("  Saving train features into cached file %s", cached_train_features_file)
+            with open(cached_train_features_file, "wb") as writer:
+                pickle.dump(train_features, writer)
+    logger.info("***** Running training *****")
+    logger.info("  Num orig examples = %d", len(train_examples))
+    logger.info("  Num split examples = %d", len(train_features))
+    logger.info("  Batch size = %d", args.train_batch_size)
+    logger.info("  Num steps = %d", num_train_steps)
+    all_input_ids = torch.tensor([f.input_ids for f in train_features], dtype=torch.long)
+    all_input_mask = torch.tensor([f.input_mask for f in train_features], dtype=torch.long)
+    all_segment_ids = torch.tensor([f.segment_ids for f in train_features], dtype=torch.long)
+    all_answer_pos= torch.tensor([f.answer_position_mask for f in  train_features],dtype=torch.long)
+    all_positions = torch.tensor([f.position for f in train_features], dtype=torch.long)
+    train_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids,all_answer_pos,all_positions)
+    if args.local_rank == -1:
+        train_sampler = RandomSampler(train_data)
+    else:
+        train_sampler = DistributedSampler(train_data)
+    train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size, drop_last=True)
+
+    max_qac, max_pac = 0, 0
+    for epoch_id in trange(int(args.num_train_epochs), desc="Epoch"):
+        model.train()
+        model.zero_grad()
+        epoch_itorator=tqdm(train_dataloader,disable=None)
+        for step, batch in enumerate(epoch_itorator):
+            if args.n_gpu == 1:
+                batch = tuple(t.to(args.device) for t in batch) # multi-gpu does scattering it-self
+            input_ids, input_mask, segment_ids, answer_pos,positions = batch
+            loss = model(input_ids, segment_ids, input_mask,answer_pos, positions)
+            if args.n_gpu > 1:
+                loss = loss.mean() # mean() to average on multi-gpu.
+            if args.gradient_accumulation_steps > 1:
+                loss = loss / args.gradient_accumulation_steps
+            if args.fp16:
+                optimizer.backward(loss)
+            else:
+                loss.backward()
+            if (step + 1) % args.gradient_accumulation_steps == 0:
+                # modify learning rate with special warm up BERT uses
+                lr_this_step = args.learning_rate * warmup_linear(global_step/t_total, args.warmup_proportion)
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = lr_this_step
+                optimizer.step()
+                optimizer.zero_grad()
+                global_step += 1
+
+            if (step+1) % 50 == 0:
+                logger.info("loss@{}:{}".format(step,loss.cpu().item()))
+
+        if args.do_evaluate and (args.local_rank == -1 or torch.distributed.get_rank() == 0): # 每个epoch后进行evaluate
+            eval_examples, eval_features, all_results = gen_predict_raw_result(args, model, raw_dev_data, tokenizer, args.device)
+            pred_results = get_or_write_predictions(eval_examples, eval_features, all_results,
+                                                    args.n_best_size, args.max_answer_length,
+                                                    args.do_lower_case, None,
+                                                    None, args.verbose_logging,
+                                                    return_mode=True)
+            QAC, PAC, TOTAL, SKIP = evaluate(raw_dev_data, pred_results)
+            logger.info('***** Eval Results *****')
+            logger.info('evaluate in {} epoch(s)'.format(epoch_id))
+            logger.info('QAC: {}'.format(QAC))
+            logger.info('PAC: {}'.format(PAC))
+            logger.info('TOTAL: {}'.format(TOTAL))
+            logger.info('SKIP: {}'.format(SKIP))
+
+            if QAC > max_qac:
+                # Save best model
+                output_model_file = os.path.join(args.output_dir, "pytorch_model_best.bin")
+                model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
+                torch.save(model_to_save.state_dict(), output_model_file)
+                logger.info('new record appears, we save it in {}'.format(output_model_file))
+        else:
+            # Save epoch model
+            output_model_file = os.path.join(args.output_dir, "pytorch_model_epoch.bin")
+            model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
+            torch.save(model_to_save.state_dict(), output_model_file)
+            logger.info('new record appears, we save it in {}'.format(output_model_file))
+
+
+def do_predict(args):
+    ## Predict
+    if args.local_rank != -1 and torch.distributed.get_rank() != 0:
+        raise ValueError('can not use local_rank to predict')
+
+    # Check path
+    if not args.predict_file:
+        raise ValueError("If `do_predict` is True, then `predict_file` must be specified.")
+    raw_test_data=json.load(open(args.predict_file,mode='r'))
+    if not args.fine_tune_checkpoint:
+        raise ValueError('when predict, fine tune checkpoint can not be None')
+
+    # Load a trained model that you have fine-tuned
+    bert_config = BertConfig.from_json_file(args.bert_config_file)
+    tokenizer = BertTokenizer(vocab_file=args.vocab_file, do_lower_case=args.do_lower_case)
+    model_state_dict = torch.load(args.fine_tune_checkpoint)
+    model =BertForQuestionAnswering(bert_config)
+    model.load_state_dict(model_state_dict)
+    model.to(args.device)
+    if args.n_gpu > 1:
+        model = torch.nn.DataParallel(model)
+
+    eval_examples, eval_features, all_results = gen_predict_raw_result(args, model, raw_test_data, tokenizer, args.device)
+    output_prediction_file = os.path.join(args.output_dir, "predictions.json")
+    output_nbest_file = os.path.join(args.output_dir, "nbest_predictions.json")
+    get_or_write_predictions(eval_examples, eval_features, all_results,
+                             args.n_best_size, args.max_answer_length,
+                             args.do_lower_case, output_prediction_file,
+                             output_nbest_file, args.verbose_logging)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--bert_config_file", default=None, type=str, required=True,
@@ -820,6 +1115,8 @@ def main():
                         help="The vocabulary file that the BERT model was trained on.")
     parser.add_argument("--init_checkpoint", default=None, type=str,
                         help="Initial checkpoint (usually from a pre-trained BERT model).")
+    parser.add_argument("--fine_tune_checkpoint", default=None, type=str,
+                        help="the checkpoint which has been fine-tune.")
 
     ## Required parameters
     parser.add_argument("--output_dir", default=None, type=str, required=True,
@@ -830,6 +1127,7 @@ def main():
 
     ## Other parameters
     parser.add_argument("--train_file", default=None, type=str, help="SQuAD json for training. E.g., train-v1.1.json")
+    parser.add_argument("--dev_file", default=None, type=str, help="dev file")
     parser.add_argument("--predict_file", default=None, type=str,
                         help="SQuAD json for predictions. E.g., dev-v1.1.json or test-v1.1.json")
     parser.add_argument("--max_seq_length", default=384, type=int,
@@ -841,6 +1139,7 @@ def main():
                         help="The maximum number of tokens for the question. Questions longer than this will "
                              "be truncated to this length.")
     parser.add_argument("--do_train", default=False, action='store_true', help="Whether to run training.")
+    parser.add_argument("--do_evaluate", default=False, action='store_true', help="Whether to do evaluate after every epoch.")
     parser.add_argument("--do_predict", default=False, action='store_true', help="Whether to run eval on the dev set.")
     parser.add_argument("--train_batch_size", default=32, type=int, help="Total batch size for training.")
     parser.add_argument("--predict_batch_size", default=32, type=int, help="Total batch size for predictions.")
@@ -907,259 +1206,15 @@ def main():
     logger.info("device: {} n_gpu: {}, distributed training: {}, 16-bits training: {}".format(
         device, n_gpu, bool(args.local_rank != -1), args.fp16))
 
-    if args.gradient_accumulation_steps < 1:
-        raise ValueError("Invalid gradient_accumulation_steps parameter: {}, should be >= 1".format(
-                            args.gradient_accumulation_steps))
-
-    args.train_batch_size = int(args.train_batch_size / args.gradient_accumulation_steps)
-
-    # 设置种子
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if n_gpu > 0:
-        torch.cuda.manual_seed_all(args.seed)
-
-    if not args.do_train and not args.do_predict:
-        raise ValueError("At least one of `do_train` or `do_predict` must be True.")
+    args.device = device
+    args.n_gpu = n_gpu
 
     if args.do_train:
-        if not args.train_file:
-            raise ValueError(
-                "If `do_train` is True, then `train_file` must be specified.")
-    if args.do_predict:
-        if not args.predict_file:
-            raise ValueError(
-                "If `do_predict` is True, then `predict_file` must be specified.")
-
-    if os.path.exists(args.output_dir)==False:
-        # raise ValueError("Output directory () already exists and is not empty.")
-        os.makedirs(args.output_dir, exist_ok=True)
-    raw_test_data=json.load(open(args.predict_file,mode='r'))
-    raw_train_data=json.load(open(args.train_file,mode='r'))
-
-    train_examples = None
-    num_train_steps = None
-    if args.do_train:
-        train_examples = read_squad_examples(raw_train_data, is_training = True)
-        logger.info("train examples {}".format(len(train_examples)))
-        num_train_steps = int(
-            len(train_examples) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
-
-    # Prepare model
-    bert_config = BertConfig.from_json_file(args.bert_config_file)
-    tokenizer = BertTokenizer(vocab_file=args.vocab_file, do_lower_case=args.do_lower_case)
-    model =BertForQuestionAnswering(bert_config)
-    if args.init_checkpoint is not None:
-        logger.info('load bert weight')
-        state_dict=torch.load(args.init_checkpoint, map_location='cpu')
-        missing_keys = []
-        unexpected_keys = []
-        error_msgs = []
-        # copy state_dict so _load_from_state_dict can modify it
-        metadata = getattr(state_dict, '_metadata', None)
-        state_dict = state_dict.copy()
-        # new_state_dict=state_dict.copy()
-        # for kye ,value in state_dict.items():
-        #     new_state_dict[kye.replace("bert","c_bert")]=value
-        # state_dict=new_state_dict
-        if metadata is not None:
-            state_dict._metadata = metadata
-        def load(module, prefix=''):
-            local_metadata = {} if metadata is None else metadata.get(prefix[:-1], {})
-
-            module._load_from_state_dict(
-                state_dict, prefix, local_metadata, True, missing_keys, unexpected_keys, error_msgs)
-            for name, child in module._modules.items():
-                # logger.info("name {} chile {}".format(name,child))
-                if child is not None:
-                    load(child, prefix + name + '.')
-        load(model, prefix='' if hasattr(model, 'bert') else 'bert.')
-        logger.info("missing keys:{}".format(missing_keys))
-        logger.info('unexpected keys:{}'.format(unexpected_keys))
-        logger.info('error msgs:{}'.format(error_msgs))
-    if args.fp16:
-        model.half()
-    model.to(device)
-    if args.local_rank != -1:
-        try:
-            from apex.parallel import DistributedDataParallel as DDP
-        except ImportError:
-            raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use distributed and fp16 training.")
-
-        model = DDP(model)
-    elif n_gpu > 1:
-        model = torch.nn.DataParallel(model)
-
-    # Prepare optimizer
-    param_optimizer = list(model.named_parameters())
-
-    # hack to remove pooler, which is not used
-    # thus it produce None grad that break apex
-    param_optimizer = [n for n in param_optimizer if 'pooler' not in n[0]]
-
-    no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
-    optimizer_grouped_parameters = [
-        {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
-        {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
-        ]
-
-    t_total = num_train_steps
-    if args.local_rank != -1:
-        t_total = t_total // torch.distributed.get_world_size()
-    if args.fp16:
-        try:
-            from apex.optimizers import FP16_Optimizer
-            from apex.optimizers import FusedAdam
-        except ImportError:
-            raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use distributed and fp16 training.")
-
-        optimizer = FusedAdam(optimizer_grouped_parameters,
-                              lr=args.learning_rate,
-                              bias_correction=False,
-                              max_grad_norm=1.0)
-        if args.loss_scale == 0:
-            optimizer = FP16_Optimizer(optimizer, dynamic_loss_scale=True)
-        else:
-            optimizer = FP16_Optimizer(optimizer, static_loss_scale=args.loss_scale)
+        do_train(args)
+    elif args.do_predict:
+        do_predict(args)
     else:
-        optimizer = BertAdam(optimizer_grouped_parameters,
-                             lr=args.learning_rate,
-                             warmup=args.warmup_proportion,
-                             t_total=t_total)
-
-    global_step = 0
-    if args.do_train:
-        cached_train_features_file = args.train_file+'_{0}_{1}_{2}_v{3}'.format(str(args.max_seq_length), str(args.doc_stride), str(args.max_query_length),str(2))
-        train_features = None
-        try:
-            with open(cached_train_features_file, "rb") as reader:
-                train_features = pickle.load(reader)
-        except:
-            train_features = convert_examples_to_features(
-                examples=train_examples,
-                tokenizer=tokenizer,
-                max_seq_length=args.max_seq_length,
-                doc_stride=args.doc_stride,
-                max_query_length=args.max_query_length,
-                is_training=True)
-
-            if args.local_rank == -1 or torch.distributed.get_rank() == 0:
-                logger.info("  Saving train features into cached file %s", cached_train_features_file)
-                with open(cached_train_features_file, "wb") as writer:
-                    pickle.dump(train_features, writer)
-        logger.info("***** Running training *****")
-        logger.info("  Num orig examples = %d", len(train_examples))
-        logger.info("  Num split examples = %d", len(train_features))
-        logger.info("  Batch size = %d", args.train_batch_size)
-        logger.info("  Num steps = %d", num_train_steps)
-        all_input_ids = torch.tensor([f.input_ids for f in train_features], dtype=torch.long)
-        all_input_mask = torch.tensor([f.input_mask for f in train_features], dtype=torch.long)
-        all_segment_ids = torch.tensor([f.segment_ids for f in train_features], dtype=torch.long)
-        all_answer_pos= torch.tensor([f.answer_position_mask for f in  train_features],dtype=torch.long)
-        all_positions = torch.tensor([f.position for f in train_features], dtype=torch.long)
-        train_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids,all_answer_pos,
-                                   all_positions)
-        if args.local_rank == -1:
-            train_sampler = RandomSampler(train_data)
-        else:
-            train_sampler = DistributedSampler(train_data)
-        train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size, drop_last=True)
-
-        model.train()
-        for _ in trange(int(args.num_train_epochs), desc="Epoch"):
-            model.zero_grad()
-            epoch_itorator=tqdm(train_dataloader,disable=None)
-            for step, batch in enumerate(epoch_itorator):
-                if n_gpu == 1:
-                    batch = tuple(t.to(device) for t in batch) # multi-gpu does scattering it-self
-                input_ids, input_mask, segment_ids, answer_pos,positions = batch
-                loss = model(input_ids, segment_ids, input_mask,answer_pos, positions)
-                if n_gpu > 1:
-                    loss = loss.mean() # mean() to average on multi-gpu.
-                if args.gradient_accumulation_steps > 1:
-                    loss = loss / args.gradient_accumulation_steps
-                if args.fp16:
-                    optimizer.backward(loss)
-                else:
-                    loss.backward()
-                if (step + 1) % args.gradient_accumulation_steps == 0:
-                    # modify learning rate with special warm up BERT uses
-                    lr_this_step = args.learning_rate * warmup_linear(global_step/t_total, args.warmup_proportion)
-                    for param_group in optimizer.param_groups:
-                        param_group['lr'] = lr_this_step
-                    optimizer.step()
-                    optimizer.zero_grad()
-                    global_step += 1
-
-                if (step+1) % 50 == 0:
-                    logger.info("loss@{}:{}".format(step,loss.cpu().item()))
-
-    # Save a trained model
-    output_model_file = os.path.join(args.output_dir, "pytorch_model.bin")
-    if args.do_train:
-        model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
-        torch.save(model_to_save.state_dict(), output_model_file)
-
-    # Load a trained model that you have fine-tuned
-    model_state_dict = torch.load(output_model_file)
-    model =BertForQuestionAnswering(bert_config)
-    model.load_state_dict(model_state_dict)
-    model.to(device)
-    if n_gpu > 1:
-        model = torch.nn.DataParallel(model)
-
-    if args.do_predict and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
-        eval_examples = read_squad_examples(
-            raw_test_data, is_training=False)
-        # eval_examples=eval_examples[:100]
-        eval_features = convert_examples_to_features(
-            examples=eval_examples,
-            tokenizer=tokenizer,
-            max_seq_length=args.max_seq_length,
-            doc_stride=args.doc_stride,
-            max_query_length=args.max_query_length,
-            is_training=False)
-
-        logger.info("***** Running predictions *****")
-        logger.info("  Num orig examples = %d", len(eval_examples))
-        logger.info("  Num split examples = %d", len(eval_features))
-        logger.info("  Batch size = %d", args.predict_batch_size)
-
-        all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
-        all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
-        all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
-        all_answer_pos= torch.tensor([f.answer_position_mask for f in  eval_features],dtype=torch.long)
-        all_example_index = torch.arange(all_input_ids.size(0), dtype=torch.long)
-        eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids,all_answer_pos, all_example_index)
-        # Run prediction for full data
-        eval_sampler = SequentialSampler(eval_data)
-        eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.predict_batch_size)
-
-        model.eval()
-        all_results = []
-        logger.info("Start evaluating")
-        for input_ids, input_mask, segment_ids,answer_pos, example_indices in tqdm(eval_dataloader, desc="Evaluating",disable=None):
-            if len(all_results) % 1000 == 0:
-                logger.info("Processing example: %d" % (len(all_results)))
-            input_ids = input_ids.to(device)
-            input_mask = input_mask.to(device)
-            segment_ids = segment_ids.to(device)
-            answer_pos=answer_pos.to(device)
-            with torch.no_grad():
-                batch_logits = model(input_ids, segment_ids, input_mask,answer_pos)
-            for i, example_index in enumerate(example_indices):
-                logits = batch_logits[i].detach().cpu().tolist()
-                eval_feature = eval_features[example_index.item()]
-                unique_id = int(eval_feature.unique_id)
-                all_results.append(RawResult(unique_id=unique_id,
-                                             logits=logits))
-        output_prediction_file = os.path.join(args.output_dir, "predictions.json")
-        output_nbest_file = os.path.join(args.output_dir, "nbest_predictions.json")
-        write_predictions(eval_examples, eval_features, all_results,
-                          args.n_best_size, args.max_answer_length,
-                          args.do_lower_case, output_prediction_file,
-                          output_nbest_file, args.verbose_logging)
+        raise ValueError("At least one of `do_train` or `do_predict` must be True.")
 
 
 if __name__ == "__main__":
