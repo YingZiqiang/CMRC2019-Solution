@@ -134,7 +134,10 @@ def read_squad_examples(input_data, is_training):
 
     examples = []
     for entry in input_data['data']:
-        # for paragraph in entry["paragraphs"]:
+        # 将“与”转为"
+        entry['context'] = entry['context'].replace('“', '"').replace('”', '"')
+        entry['choices'] = [choice.replace('“', '"').replace('”', '"') for choice in entry['choices']]
+
         paragraph=entry
         context_index=entry["context_id"]
         paragraph_text = paragraph["context"]
