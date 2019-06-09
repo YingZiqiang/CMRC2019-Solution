@@ -5,3 +5,4 @@ __pycache__/
 # my ignore
 bert_weights_chinese
 data/cmrc2019_*.json_*
+fixed_baseline/fixed_baseline_output
