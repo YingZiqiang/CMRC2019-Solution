@@ -197,7 +197,7 @@ def read_squad_examples(input_data, is_training):
 
                 example = SquadExample(
                     qas_id=str(context_index)+"###"+str(answer_index), # e.g. TRIAL_00001###0
-                    question_text=question_text, # 正确答案句子, str类型
+                    question_text=question_text, # 正确答案句子(choices[choice_num]), str类型
                     doc_tokens=doc_tokens, # 字的token list, 但是其中[unused1]是一个整体
                     orig_answer_text=orig_answer_text, # [unused1]
                     position=start_position # [unused1]出现的位置
@@ -239,17 +239,17 @@ class InputFeatures(object):
                  segment_ids,
                  answer_position_mask,
                  position=None):
-        self.unique_id = unique_id
-        self.example_index = example_index
-        self.doc_span_index = doc_span_index
-        self.tokens = tokens
-        self.token_to_orig_map = token_to_orig_map
-        self.token_is_max_context = token_is_max_context
-        self.input_ids = input_ids
-        self.input_mask = input_mask
-        self.segment_ids = segment_ids
-        self.answer_position_mask=answer_position_mask
-        self.position = position
+        self.unique_id = unique_id # e.g. 1000000001(每次doc stride后+1)
+        self.example_index = example_index # e.g. 1(每个example只有一个)
+        self.doc_span_index = doc_span_index # doc_stride后doc的引索
+        self.tokens = tokens # query+subdoc拼接后的tokens
+        self.token_to_orig_map = token_to_orig_map # subdoc中token id到未tokenize前id的字典
+        self.token_is_max_context = token_is_max_context # subdoc
+        self.input_ids = input_ids # token ids
+        self.input_mask = input_mask # 1 for real tokens and 0 for padding tokens
+        self.segment_ids = segment_ids # 前一句为0, 后一句为1
+        self.answer_position_mask=answer_position_mask # blank mask
+        self.position = position # 修正后的position index
 
 
 
@@ -271,10 +271,10 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
         all_doc_tokens = []
         for (i, token) in enumerate(example.doc_tokens):
             orig_to_tok_index.append(len(all_doc_tokens))
-            if token.find("unused")>-1:#  not Part-of-speech of [unused1-15]
+            if token.find("unused")>-1:
                 sub_tokens=[str(token)]
             else:
-                sub_tokens = tokenizer.tokenize(token)
+                sub_tokens = tokenizer.tokenize(token) # not Part-of-speech of [unused1-15]
             for sub_token in sub_tokens:
                 tok_to_orig_index.append(i)
                 all_doc_tokens.append(sub_token)
