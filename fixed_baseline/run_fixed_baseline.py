@@ -60,6 +60,14 @@ class BertForQuestionAnswering(BertPreTrainedModel):
         self.apply(self.init_bert_weights)
 
     def forward(self, input_ids, token_type_ids=None, attention_mask=None, answer_mask=None,positions=None):
+        """
+        Args:
+            input_ids: word ids
+            token_type_ids: segment ids
+            attention_mask: input mask
+            answer_mask: answer pos
+            positions: positions index
+        """
         sequence_output, _ = self.bert(input_ids, token_type_ids, attention_mask, output_all_encoded_layers=False)
         answer_mask = answer_mask.to(dtype=next(self.parameters()).dtype)
         logits = self.qa_outputs(sequence_output).squeeze(-1)
@@ -252,7 +260,7 @@ class InputFeatures(object):
         self.input_ids = input_ids # token ids
         self.input_mask = input_mask # 1 for real tokens and 0 for padding tokens
         self.segment_ids = segment_ids # 前一句为0, 后一句为1
-        self.answer_position_mask=answer_position_mask # blank mask
+        self.answer_position_mask=answer_position_mask # blank mask, 一个sample中所有的[unset1-15]均为1
         self.position = position # 修正后的position index
 
 
@@ -1102,7 +1110,7 @@ def do_predict(args):
         model = torch.nn.DataParallel(model)
 
     eval_examples, eval_features, all_results = gen_predict_raw_result(args, model, raw_test_data, tokenizer, args.device)
-    output_prediction_file = os.path.join(args.output_dir, "predictions.json")
+    output_prediction_file = os.path.join(args.output_dir, 'pred_' + args.predict_file.split('/')[-1])
     output_nbest_file = os.path.join(args.output_dir, "nbest_predictions.json")
     get_or_write_predictions(eval_examples, eval_features, all_results,
                              args.n_best_size, args.max_answer_length,
