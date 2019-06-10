@@ -1055,7 +1055,7 @@ def do_train(args):
                                                     return_mode=True)
             QAC, PAC, TOTAL, SKIP = evaluate(raw_dev_data, pred_results)
             logger.info('***** Eval Results *****')
-            logger.info('evaluate in {} epoch(s)'.format(epoch_id))
+            logger.info('evaluate in {} epoch(s)'.format(epoch_id+1))
             logger.info('QAC: {}'.format(QAC))
             logger.info('PAC: {}'.format(PAC))
             logger.info('TOTAL: {}'.format(TOTAL))
@@ -1067,6 +1067,10 @@ def do_train(args):
                 model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
                 torch.save(model_to_save.state_dict(), output_model_file)
                 logger.info('new record appears, we save it in {}'.format(output_model_file))
+                # Update best records
+                max_qac = QAC
+                max_pac = PAC
+
         else:
             # Save epoch model
             output_model_file = os.path.join(args.output_dir, "pytorch_model_epoch.bin")

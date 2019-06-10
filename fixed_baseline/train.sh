@@ -8,7 +8,7 @@ python run_fixed_baseline.py \
 	--init_checkpoint ../bert_weights_chinese/pytorch_model.bin \
 	--do_train \
 	--do_evaluate \
-	--train_file ../data/cmrc2019_trial.json \
+	--train_file ../data/cmrc2019_train.json \
 	--dev_file ../data/cmrc2019_trial.json \
 	--train_batch_size 24 \
 	--learning_rate 2e-5 \
