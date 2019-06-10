@@ -9,10 +9,11 @@ python run_fixed_baseline.py \
 	--do_train \
 	--do_evaluate \
 	--train_file ../data/cmrc2019_train.json \
-	--dev_file ../data/cmrc2019_trial.json \
+	--dev_file ../data/cmrc2019_dev.json \
 	--train_batch_size 24 \
 	--learning_rate 2e-5 \
 	--num_train_epochs 10.0 \
 	--max_seq_length 512 \
 	--gradient_accumulation_steps 2 \
-	--output_dir ./fixed_baseline_output
+	--output_dir ./fixed_baseline_output \
+	--seed 777

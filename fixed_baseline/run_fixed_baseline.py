@@ -260,7 +260,7 @@ class InputFeatures(object):
         self.input_ids = input_ids # token ids
         self.input_mask = input_mask # 1 for real tokens and 0 for padding tokens
         self.segment_ids = segment_ids # 前一句为0, 后一句为1
-        self.answer_position_mask=answer_position_mask # blank mask, 一个sample中所有的[unset1-15]均为1
+        self.answer_position_mask=answer_position_mask # blank mask, 一个sample中所有的[unset1-15]均为1(截断后)
         self.position = position # 修正后的position index
 
 
@@ -824,6 +824,9 @@ def warmup_linear(x, warmup=0.002):
     return 1.0 - x
 
 def gen_predict_raw_result(args, model, raw_test_data, tokenizer, device):
+    """
+    模型进行eval, 得到未处理的预测数据(raw predict results)
+    """
     eval_examples = read_squad_examples(
         raw_test_data, is_training=False)
     # eval_examples=eval_examples[:100]
