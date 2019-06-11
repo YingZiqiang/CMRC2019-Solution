@@ -255,7 +255,7 @@ class InputFeatures(object):
         self.example_index = example_index  # e.g. 1(每个example只有一个)
         self.doc_span_index = doc_span_index  # doc_stride后doc的引索
         self.tokens = tokens  # query+subdoc拼接后的tokens
-        self.token_to_orig_map = token_to_orig_map  # subdoc中token id到未tokenize前id的字典
+        self.token_to_orig_map = token_to_orig_map  # subdoc中token index到未tokenize前index的字典
         self.token_is_max_context = token_is_max_context  # subdoc
         self.input_ids = input_ids  # token ids
         self.input_mask = input_mask  # 1 for real tokens and 0 for padding tokens
@@ -572,6 +572,7 @@ def get_or_write_predictions(all_examples, all_features, all_results, n_best_siz
             tok_text = " ".join(tok_text.split())
             orig_text = " ".join(orig_tokens)
 
+            # final_text = 大概率为[unset1-15]其中一个
             final_text = get_final_text(tok_text, orig_text, do_lower_case, verbose_logging)
             if final_text in seen_predictions:
                 continue
@@ -621,9 +622,9 @@ def get_or_write_predictions(all_examples, all_features, all_results, n_best_siz
     right_num = 0
     all_num = 0
     all_num1 = 0
-    all_context_dict = dict()
+    all_context_dict = dict()  # 以一个sample作为整体
     for key, value in all_predictions.items():
-        context_id, answer_id = key.split("###")
+        context_id, answer_id = key.split("###")  # answer_id代表choice index
         example = all_examples_dict[key]
         if context_id in all_context_dict:
             all_context_dict[context_id].append([example, answer_id, value])
