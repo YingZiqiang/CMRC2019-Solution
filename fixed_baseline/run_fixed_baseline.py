@@ -501,7 +501,13 @@ RawResult = collections.namedtuple("RawResult",
 def get_or_write_predictions(all_examples, all_features, all_results, n_best_size,
                       max_answer_length, do_lower_case, output_prediction_file,
                       output_nbest_file, verbose_logging, return_mode=False):
-    """Write final predictions to the json file."""
+    """
+    Write final predictions to the json file.
+    Args:
+        all_examples: Example的list(注意one of answer + context代表一个Example)
+        all_features: 经过convert_examples_to_features函数后的InputFeatures的list
+        all_results: (unique_id, logits)的list, length与all_features一致
+    """
     logger.info("Writing predictions to: %s" % (output_prediction_file))
     logger.info("Writing nbest to: %s" % (output_nbest_file))
 
@@ -520,7 +526,7 @@ def get_or_write_predictions(all_examples, all_features, all_results, n_best_siz
     all_predictions = collections.OrderedDict()
     all_nbest_json = collections.OrderedDict()
     for (example_index, example) in enumerate(all_examples):
-        features = example_index_to_features[example_index]
+        features = example_index_to_features[example_index] # 一个sample中所有的feature
 
         prelim_predictions = []
         for (feature_index, feature) in enumerate(features):
