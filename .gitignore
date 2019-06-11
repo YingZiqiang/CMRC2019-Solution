@@ -3,8 +3,10 @@ __pycache__/
 *.py[cod]
 
 # my ignore
+test.py
 bert_weights_chinese
 data/cmrc2019_*.json_*
+data/tiny*
 *_output
 *.log
 .idea/
