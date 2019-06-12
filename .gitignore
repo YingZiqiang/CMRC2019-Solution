@@ -4,6 +4,7 @@ __pycache__/
 
 # my ignore
 test.py
+pretrained_weights/
 bert_weights_chinese
 data/cmrc2019_*.json_*
 data/tiny*
