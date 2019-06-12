@@ -149,8 +149,8 @@ def read_squad_examples(input_data, is_training):
     examples = []
     for entry in input_data['data']:
         # 将“与”转为"
-        entry['context'] = entry['context'].replace('“', '"').replace('”', '"')
-        entry['choices'] = [choice.replace('“', '"').replace('”', '"') for choice in entry['choices']]
+        # entry['context'] = entry['context'].replace('“', '"').replace('”', '"')
+        # entry['choices'] = [choice.replace('“', '"').replace('”', '"') for choice in entry['choices']]
 
         paragraph = entry
         context_index = entry["context_id"]
@@ -1006,7 +1006,7 @@ def do_train(args):
     global_step = 0
     cached_train_features_file = args.train_file + '_{0}_{1}_{2}_v{3}'.format(str(args.max_seq_length),
                                                                               str(args.doc_stride),
-                                                                              str(args.max_query_length), str(2))
+                                                                              str(args.max_query_length), str(3))
     train_features = None
     try:
         with open(cached_train_features_file, "rb") as reader:
