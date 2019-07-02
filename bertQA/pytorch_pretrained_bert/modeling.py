@@ -358,7 +358,7 @@ class BertDirectedAttention(nn.Module):
         super(BertDirectedAttention, self).__init__()
         layer = BertDeLayer(config)
         # TODO range(7)?
-        self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(2)])
+        self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(5)])
 
     def forward(self, hidden_states, cattention_mask, qattention_mask, output_all_deencoded_layers=True):
         call_deencoder_layers = []

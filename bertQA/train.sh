@@ -10,7 +10,7 @@ python run_bertQA.py \
 	--do_evaluate \
 	--train_file ../data/cmrc2019_train.json \
 	--dev_file ../data/cmrc2019_dev.json \
-	--train_batch_size 24 \
+	--train_batch_size 12 \
 	--predict_batch_size 64 \
 	--learning_rate 2e-5 \
 	--num_train_epochs 10.0 \

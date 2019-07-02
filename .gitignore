@@ -8,6 +8,7 @@ pretrained_weights/
 bert_weights_chinese
 data/cmrc2019_*.json_*
 data/tiny*
+data/*aug*
 *_output
 *.log
 .idea/
